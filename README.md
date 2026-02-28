@@ -29,3 +29,16 @@ Add package dependency in Xcode:
 - Codable compatibility for core lesson and flashcard payloads.
 - Tolerant decoding for model-generated JSON (missing IDs, missing lesson title).
 - Stable content hashing for dedupe workflows.
+
+## Automated Release Versioning
+
+This repository includes a GitHub Actions release pipeline:
+
+- Trigger: every push to `main`
+- Steps:
+  - `swift build -c release`
+  - `swift test -c release`
+  - auto-increment SemVer tag (`v0.1.0`, `v0.1.1`, `v0.1.2`, ...)
+  - publish a GitHub Release with generated notes
+
+Workflow file: `.github/workflows/release.yml`
