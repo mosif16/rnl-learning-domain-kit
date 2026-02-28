@@ -28,17 +28,43 @@ Add package dependency in Xcode:
 
 - Codable compatibility for core lesson and flashcard payloads.
 - Tolerant decoding for model-generated JSON (missing IDs, missing lesson title).
-- Stable content hashing for dedupe workflows.
+- Deterministic content hashing for dedupe workflows.
+- Chunked transcripts never exceed configured word limits.
+- Lesson merge behavior is deterministic for metadata and objectives.
+- Explicit model validation API with structured issue paths.
 
-## Automated Release Versioning
+## Validation API
 
-This repository includes a GitHub Actions release pipeline:
+Use validation before persisting or sending model payloads across boundaries:
 
-- Trigger: every push to `main`
-- Steps:
-  - `swift build -c release`
-  - `swift test -c release`
-  - auto-increment SemVer tag (`v0.1.0`, `v0.1.1`, `v0.1.2`, ...)
-  - publish a GitHub Release with generated notes
+- `validationIssues()` returns all issues with precise field paths.
+- `validate()` throws the first `LearningDomainValidationIssue`.
 
-Workflow file: `.github/workflows/release.yml`
+Covered types include:
+
+- `FlashCard`, `LessonSection`, `QuizQuestion`, `LessonQuiz`
+- `LessonMetadata`, `ContentLineage`, `FlashCardDeckSource`
+- `FlashCardDeck`, `Lesson`
+
+## Versioning
+
+This package uses semantic versioning via a local `VERSION` file and a bump script:
+
+- Current version source of truth: `VERSION`
+- Public code constant: `LearningDomainKitVersion.current`
+- Automation script: `scripts/bump_version.sh`
+
+Usage:
+
+- Patch bump: `./scripts/bump_version.sh` or `./scripts/bump_version.sh patch`
+- Minor bump: `./scripts/bump_version.sh minor`
+- Major bump: `./scripts/bump_version.sh major`
+
+Each run updates both:
+
+- `VERSION`
+- `Sources/LearningDomainKit/LearningDomainKitVersion.swift`
+
+## Improvement Plan
+
+- See `docs/IMPROVEMENT_PLAN.md` for completed hardening work and next steps.

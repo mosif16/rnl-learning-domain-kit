@@ -1,26 +1,50 @@
 import Foundation
 
 public final class LessonProcessor: Sendable {
-    private let duplicateSimilarityThreshold: Double = 0.85
-    private let maxChunkWordCount = 1000
+    private let duplicateSimilarityThreshold: Double
+    private let maxChunkWordCount: Int
 
-    public init() {}
+    public init(
+        duplicateSimilarityThreshold: Double = 0.85,
+        maxChunkWordCount: Int = 1_000
+    ) {
+        precondition(
+            (0...1).contains(duplicateSimilarityThreshold),
+            "duplicateSimilarityThreshold must be between 0 and 1"
+        )
+        precondition(maxChunkWordCount > 0, "maxChunkWordCount must be greater than 0")
+
+        self.duplicateSimilarityThreshold = duplicateSimilarityThreshold
+        self.maxChunkWordCount = maxChunkWordCount
+    }
 
     public func mergeFlashCards(from lessons: [Lesson]) -> [FlashCard] {
         let allFlashCards = lessons.flatMap(\ .flashCards)
 
         var uniqueFlashCards: [FlashCard] = []
-        var seenNormalizedQuestions: [String] = []
+        var seenExactNormalizedQuestions = Set<String>()
+        var seenQuestionBuckets: [String: [String]] = [:]
 
         for card in allFlashCards {
             let normalizedQuestion = normalizeForComparison(card.question)
+            if normalizedQuestion.isEmpty {
+                continue
+            }
 
-            let isDuplicate = seenNormalizedQuestions.contains {
+            if seenExactNormalizedQuestions.contains(normalizedQuestion) {
+                continue
+            }
+
+            let bucketKey = duplicateBucketKey(for: normalizedQuestion)
+            let candidates = seenQuestionBuckets[bucketKey] ?? []
+
+            let isDuplicate = candidates.contains {
                 jaccardSimilarity(normalizedQuestion, $0) >= duplicateSimilarityThreshold
             }
 
             if !isDuplicate {
-                seenNormalizedQuestions.append(normalizedQuestion)
+                seenExactNormalizedQuestions.insert(normalizedQuestion)
+                seenQuestionBuckets[bucketKey, default: []].append(normalizedQuestion)
                 uniqueFlashCards.append(card)
             }
         }
@@ -29,36 +53,49 @@ public final class LessonProcessor: Sendable {
     }
 
     public func estimateDurationInMinutes(from transcript: String) -> Int {
-        let wordCount = transcript
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .count
-        let estimatedMinutes = max(1, wordCount / 150)
+        let estimatedMinutes = max(1, wordCount(in: transcript) / 150)
         return max(5, estimatedMinutes)
     }
 
     public func calculateFlashcardsPerChunk(totalChunks: Int, transcript: String? = nil) -> Int {
-        _ = totalChunks
-        _ = transcript
-        return 15
+        guard totalChunks > 0 else {
+            return 0
+        }
+
+        let minPerChunk = 4
+        let maxPerChunk = 25
+        let defaultPerChunk = 12
+
+        guard let transcript, !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return defaultPerChunk
+        }
+
+        let transcriptWordCount = wordCount(in: transcript)
+        guard transcriptWordCount > 0 else {
+            return defaultPerChunk
+        }
+
+        let estimatedTotalCards = min(120, max(12, transcriptWordCount / 110))
+        let perChunk = Int(ceil(Double(estimatedTotalCards) / Double(totalChunks)))
+        return min(maxPerChunk, max(minPerChunk, perChunk))
     }
 
     public func chunkTranscript(_ transcript: String) -> [String] {
-        if transcript.count < 1000 {
+        if wordCount(in: transcript) <= maxChunkWordCount {
             return [transcript]
         }
 
         var chunks = chunkByParagraphs(transcript)
 
-        if chunks.count < 2 || (chunks.first?.count ?? 0) > 100_000 {
+        if chunks.count < 2 || hasOversizedChunk(chunks) {
             chunks = chunkBySentences(transcript)
         }
 
-        if chunks.isEmpty || (chunks.first?.count ?? 0) > 100_000 {
+        if chunks.isEmpty || hasOversizedChunk(chunks) {
             chunks = chunkByWords(transcript)
         }
 
-        return chunks
+        return chunks.filter { !$0.isEmpty }
     }
 
     public func mergeLessons(_ lessons: [Lesson]) -> Lesson {
@@ -78,22 +115,51 @@ public final class LessonProcessor: Sendable {
             )
         }
 
-        let title = lessons[0].title
-        let objectives = lessons[0].objectives
+        let title = lessons.compactMap { nonEmptyTrimmed($0.title) }.first ?? lessons[0].title
+        let objectives = uniquePreservingOrder(
+            lessons.flatMap(\ .objectives).compactMap(nonEmptyTrimmed)
+        )
         let allSections = lessons.flatMap(\ .sections)
         let allFlashCards = mergeFlashCards(from: lessons)
-        let allQuestions = lessons.compactMap(\ .quiz).flatMap(\ .questions)
-        let quiz = allQuestions.isEmpty ? nil : LessonQuiz(questions: allQuestions)
+        let allQuestions = uniquePreservingOrder(
+            lessons
+                .compactMap(\ .quiz)
+                .flatMap(\ .questions)
+        )
+        let quizTitle = lessons
+            .compactMap(\ .quiz)
+            .compactMap { nonEmptyTrimmed($0.title) }
+            .first
+            ?? ""
+        let quiz = allQuestions.isEmpty ? nil : LessonQuiz(questions: allQuestions, title: quizTitle)
 
-        let totalWordCount = allSections.compactMap(\ .wordCount).reduce(0, +)
+        let sectionWordCount = allSections.compactMap(\ .wordCount).reduce(0, +)
+        let metadataWordCount = lessons.compactMap(\ .metadata.totalWordCount).reduce(0, +)
+        let mergedWordCount: Int? = {
+            if sectionWordCount > 0 {
+                return sectionWordCount
+            }
+
+            if metadataWordCount > 0 {
+                return metadataWordCount
+            }
+
+            return 0
+        }()
         let metadata = LessonMetadata(
-            sourceTranscript: lessons[0].metadata.sourceTranscript,
-            sourceAudioDuration: lessons[0].metadata.sourceAudioDuration,
-            totalWordCount: totalWordCount,
-            createdAt: Date(),
-            difficulty: lessons[0].metadata.difficulty,
-            sourceRecordingId: lessons[0].metadata.sourceRecordingId,
-            transcriptPath: lessons[0].metadata.transcriptPath
+            sourceTranscript: firstNonEmpty(
+                lessons.compactMap(\ .metadata.sourceTranscript)
+            ),
+            sourceAudioDuration: lessons.compactMap(\ .metadata.sourceAudioDuration).max(),
+            totalWordCount: mergedWordCount,
+            createdAt: lessons.map(\ .metadata.createdAt).min() ?? Date(),
+            difficulty: mergedDifficulty(from: lessons.compactMap(\ .metadata.difficulty)),
+            sourceRecordingId: firstNonEmpty(
+                lessons.compactMap(\ .metadata.sourceRecordingId)
+            ),
+            transcriptPath: firstNonEmpty(
+                lessons.compactMap(\ .metadata.transcriptPath)
+            )
         )
 
         return Lesson(
@@ -135,6 +201,19 @@ public final class LessonProcessor: Sendable {
         return Double(intersection) / Double(union)
     }
 
+    private func duplicateBucketKey(for normalizedText: String) -> String {
+        let tokens = normalizedText
+            .components(separatedBy: .whitespaces)
+            .filter { !$0.isEmpty }
+            .sorted()
+
+        guard !tokens.isEmpty else {
+            return "__empty__"
+        }
+
+        return tokens.prefix(2).joined(separator: "|")
+    }
+
     private func chunkByParagraphs(_ transcript: String) -> [String] {
         let paragraphs = transcript.components(separatedBy: "\n\n")
 
@@ -143,10 +222,21 @@ public final class LessonProcessor: Sendable {
         var currentWordCount = 0
 
         for paragraph in paragraphs {
-            let paragraphWordCount = paragraph
-                .components(separatedBy: .whitespacesAndNewlines)
-                .filter { !$0.isEmpty }
-                .count
+            let paragraphWordCount = wordCount(in: paragraph)
+            guard paragraphWordCount > 0 else {
+                continue
+            }
+
+            if paragraphWordCount > maxChunkWordCount {
+                if !currentChunk.isEmpty {
+                    chunks.append(currentChunk.joined(separator: "\n\n"))
+                    currentChunk = []
+                    currentWordCount = 0
+                }
+
+                chunks.append(contentsOf: chunkByWords(paragraph))
+                continue
+            }
 
             if !currentChunk.isEmpty && currentWordCount + paragraphWordCount > maxChunkWordCount {
                 chunks.append(currentChunk.joined(separator: "\n\n"))
@@ -202,10 +292,21 @@ public final class LessonProcessor: Sendable {
         var currentWordCount = 0
 
         for sentence in sentences {
-            let sentenceWordCount = sentence
-                .components(separatedBy: .whitespacesAndNewlines)
-                .filter { !$0.isEmpty }
-                .count
+            let sentenceWordCount = wordCount(in: sentence)
+            guard sentenceWordCount > 0 else {
+                continue
+            }
+
+            if sentenceWordCount > maxChunkWordCount {
+                if !currentChunk.isEmpty {
+                    chunks.append(currentChunk.joined(separator: " "))
+                    currentChunk = []
+                    currentWordCount = 0
+                }
+
+                chunks.append(contentsOf: chunkByWords(sentence))
+                continue
+            }
 
             if !currentChunk.isEmpty && currentWordCount + sentenceWordCount > maxChunkWordCount {
                 chunks.append(currentChunk.joined(separator: " "))
@@ -251,5 +352,55 @@ public final class LessonProcessor: Sendable {
         }
 
         return chunks
+    }
+
+    private func wordCount(in text: String) -> Int {
+        text.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .count
+    }
+
+    private func hasOversizedChunk(_ chunks: [String]) -> Bool {
+        chunks.contains { wordCount(in: $0) > maxChunkWordCount }
+    }
+
+    private func firstNonEmpty(_ values: [String]) -> String? {
+        values.compactMap(nonEmptyTrimmed).first
+    }
+
+    private func nonEmptyTrimmed(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func uniquePreservingOrder<T: Hashable>(_ values: [T]) -> [T] {
+        var seen = Set<T>()
+        var result: [T] = []
+
+        for value in values where !seen.contains(value) {
+            seen.insert(value)
+            result.append(value)
+        }
+
+        return result
+    }
+
+    private func mergedDifficulty(from difficulties: [LessonMetadata.LessonDifficulty]) -> LessonMetadata.LessonDifficulty? {
+        guard !difficulties.isEmpty else {
+            return nil
+        }
+
+        return difficulties.max(by: { difficultyScore(for: $0) < difficultyScore(for: $1) })
+    }
+
+    private func difficultyScore(for difficulty: LessonMetadata.LessonDifficulty) -> Int {
+        switch difficulty {
+        case .beginner:
+            return 1
+        case .intermediate:
+            return 2
+        case .advanced:
+            return 3
+        }
     }
 }

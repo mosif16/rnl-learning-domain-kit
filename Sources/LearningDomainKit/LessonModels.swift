@@ -336,6 +336,11 @@ public struct LessonQuiz: Codable, Identifiable, Equatable, Sendable, Hashable {
     public static func == (lhs: LessonQuiz, rhs: LessonQuiz) -> Bool {
         lhs.questions == rhs.questions && lhs.id == rhs.id
     }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(questions)
+    }
 }
 
 public struct QuizQuestion: Codable, Identifiable, Equatable, Sendable, Hashable {
@@ -351,6 +356,12 @@ public struct QuizQuestion: Codable, Identifiable, Equatable, Sendable, Hashable
         correctAnswerIndex: Int,
         explanation: String? = nil
     ) {
+        precondition(!options.isEmpty, "options must not be empty")
+        precondition(
+            options.indices.contains(correctAnswerIndex),
+            "correctAnswerIndex must reference a valid option index"
+        )
+
         self.question = question
         self.options = options
         self.correctAnswerIndex = correctAnswerIndex
@@ -368,7 +379,16 @@ public struct QuizQuestion: Codable, Identifiable, Equatable, Sendable, Hashable
 
         self.question = try container.decode(String.self, forKey: .question)
         self.options = try container.decode([String].self, forKey: .options)
-        self.correctAnswerIndex = try container.decode(Int.self, forKey: .correctAnswerIndex)
+        let correctAnswerIndex = try container.decode(Int.self, forKey: .correctAnswerIndex)
+        guard options.indices.contains(correctAnswerIndex) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .correctAnswerIndex,
+                in: container,
+                debugDescription: "correctAnswerIndex must reference a valid option index"
+            )
+        }
+
+        self.correctAnswerIndex = correctAnswerIndex
         self.explanation = try container.decodeIfPresent(String.self, forKey: .explanation)
     }
 
@@ -377,6 +397,13 @@ public struct QuizQuestion: Codable, Identifiable, Equatable, Sendable, Hashable
         lhs.options == rhs.options &&
         lhs.correctAnswerIndex == rhs.correctAnswerIndex &&
         lhs.explanation == rhs.explanation
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(question)
+        hasher.combine(options)
+        hasher.combine(correctAnswerIndex)
+        hasher.combine(explanation)
     }
 
     private static func decodeUUIDIfPresent(container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys) -> UUID? {
@@ -413,19 +440,28 @@ public enum Difficulty: String, CaseIterable, Codable, Identifiable, Sendable {
 
 extension Lesson: HashableContent {
     public var contentHash: String {
-        var contentString = title.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        contentString += objectives.sorted().joined()
+        var parts: [String] = [title]
+        parts.append(contentsOf: objectives.sorted())
 
         for section in sections {
-            contentString += section.heading.lowercased()
-            contentString += section.content.lowercased()
+            parts.append(section.heading)
+            parts.append(section.content)
         }
 
-        for card in flashCards.sorted(by: { $0.question < $1.question }) {
-            contentString += card.question.lowercased()
+        let sortedCards = flashCards.sorted {
+            if $0.question != $1.question {
+                return $0.question < $1.question
+            }
+
+            return $0.answer < $1.answer
         }
 
-        return DeduplicationHasher.hash(contentString)
+        for card in sortedCards {
+            parts.append(card.question)
+            parts.append(card.answer)
+        }
+
+        return DeduplicationHasher.hash(parts: parts)
     }
 
     public var deduplicationID: String {
@@ -443,6 +479,10 @@ extension Lesson: Equatable {
     public static func == (lhs: Lesson, rhs: Lesson) -> Bool {
         lhs.id == rhs.id &&
         lhs.title == rhs.title &&
-        lhs.objectives == rhs.objectives
+        lhs.objectives == rhs.objectives &&
+        lhs.sections == rhs.sections &&
+        lhs.quiz == rhs.quiz &&
+        lhs.metadata == rhs.metadata &&
+        lhs.flashCards == rhs.flashCards
     }
 }

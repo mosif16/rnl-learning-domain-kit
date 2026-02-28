@@ -41,14 +41,21 @@ public struct FlashCardDeck: Codable, Identifiable, Hashable, Sendable {
 
 extension FlashCardDeck: HashableContent {
     public var contentHash: String {
-        var contentString = title.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let sortedCards = cards.sorted {
+            if $0.question != $1.question {
+                return $0.question < $1.question
+            }
 
-        for card in cards.sorted(by: { $0.question < $1.question }) {
-            contentString += card.question.lowercased()
-            contentString += card.answer.lowercased()
+            return $0.answer < $1.answer
         }
 
-        return DeduplicationHasher.hash(contentString)
+        var parts = [title]
+        for card in sortedCards {
+            parts.append(card.question)
+            parts.append(card.answer)
+        }
+
+        return DeduplicationHasher.hash(parts: parts)
     }
 
     public var deduplicationID: String {
